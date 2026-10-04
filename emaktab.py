@@ -52,11 +52,20 @@ def create_driver():
         o.add_argument("--headless=new")
     o.add_argument("--no-sandbox")
     o.add_argument("--disable-dev-shm-usage")
+    o.add_argument("--disable-gpu")
     o.add_argument("--window-size=1440,1000")
     o.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36"
     )
+    # Docker/Railway'da Chrome aniq joyga o'rnatiladi (Dockerfile'ga
+    # qarang). CHROME_BIN berilgan bo'lsa, Selenium Manager tasodifiy
+    # versiyani tusmollab, mavjud bo'lmagan chromedriver yuklab olishi
+    # (va keyin ishga tushmay qolishi) o'rniga shu aniq brauzerni
+    # ishlatadi.
+    chrome_bin = os.getenv("CHROME_BIN")
+    if chrome_bin:
+        o.binary_location = chrome_bin
     return webdriver.Chrome(options=o)
 
 
