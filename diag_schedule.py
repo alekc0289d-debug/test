@@ -61,9 +61,11 @@ def get_schedule_like_bot(class_id):
         lessons = d.get("lessons") or d.get("items") or []
         if lessons:
             return ("BITTA HUJJAT (documentdan)", lessons)
-    snap = client.collection("schedule").where("classId", "==", class_id).stream()
-    rows = [s.to_dict() for s in snap]
-    return ("WHERE SO'ROVI (classId bo'yicha)", rows)
+    rows = []
+    for field in ("classId", "className"):
+        snap = client.collection("schedule").where(field, "==", class_id).stream()
+        rows.extend(s.to_dict() for s in snap)
+    return ("WHERE SO'ROVI (classId YOKI className bo'yicha)", rows)
 
 src, rows = get_schedule_like_bot(settings.class_id)
 print(f"   manba: {src}, topilgan dars soni: {len(rows)}")

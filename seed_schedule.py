@@ -91,11 +91,16 @@ def main():
     # tozalaymiz, keyin qayta yozamiz — bir necha marta ishga tushirish
     # xavfsiz bo'lishi uchun.
     deleted = 0
-    for doc in coll.where("classId", "==", class_id).stream():
-        data = doc.to_dict()
-        if not data.get("studentId"):
-            doc.reference.delete()
-            deleted += 1
+    seen_ids = set()
+    for field in ("classId", "className"):
+        for doc in coll.where(field, "==", class_id).stream():
+            if doc.id in seen_ids:
+                continue
+            data = doc.to_dict()
+            if not data.get("studentId"):
+                doc.reference.delete()
+                seen_ids.add(doc.id)
+                deleted += 1
     if deleted:
         log.info("Eski %s ta umumiy yozuv o'chirildi", deleted)
 
@@ -103,7 +108,11 @@ def main():
     for day in JADVAL:
         for lesson in day["lessons"]:
             coll.add({
+                # Loyihaning turli qismlari sinfni turlicha nomlagan —
+                # ikkalasini ham yozamiz, shunda qaysi birini qidirishdan
+                # qat'i nazar topiladi.
                 "classId": class_id,
+                "className": class_id,
                 "dayOfWeek": day["dayOfWeek"],
                 **lesson,
                 "source": "seed_schedule",
