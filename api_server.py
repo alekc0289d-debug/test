@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -418,7 +418,8 @@ def _process_captcha_answers():
     process_answered(sync_one)
 
 
-scheduler = BackgroundScheduler(timezone="Asia/Tashkent")
+TASHKENT_TZ = timezone(timedelta(hours=5))
+scheduler = BackgroundScheduler(timezone=TASHKENT_TZ)
 scheduler.add_job(
     sync_all_students,
     "cron",

@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import traceback
+from datetime import timedelta, timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -142,7 +143,7 @@ def main():
         sync_queue(BATCH, a.class_id)
         return
 
-    s = BlockingScheduler(timezone="Asia/Tashkent")
+    s = BlockingScheduler(timezone=timezone(timedelta(hours=5)))
     s.add_job(
         sync_queue,
         "cron",
