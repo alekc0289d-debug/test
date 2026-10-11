@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         wget gnupg ca-certificates fonts-liberation \
         libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
         libgbm1 libasound2 libxkbcommon0 libxcomposite1 libxdamage1 \
-        libxfixes3 libxrandr2 libu2f-udev libvulkan1 xdg-utils \
+        libxfixes3 libxrandr2 libu2f-udev libvulkan1 xdg-utils tini \
     && wget -q -O /usr/share/keyrings/google-chrome.gpg.key \
         https://dl.google.com/linux/linux_signing_key.pub \
     && gpg --dearmor --output /usr/share/keyrings/google-chrome.gpg \
@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV CHROME_BIN=/usr/bin/google-chrome
 ENV CHROME_HEADLESS=true
+# Loglar darhol chiqsin (Railway logida kechikmasligi uchun)
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 COPY requirements.txt .
@@ -35,4 +37,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# tini — Chrome ko'p bolalik jarayon ochadi; ular tugagach "zombi" bo'lib
+# qolib to'planib ketmasligi uchun PID 1 vazifasini tini bajaradi.
+ENTRYPOINT ["tini", "--"]
 CMD ["python", "api_server.py"]

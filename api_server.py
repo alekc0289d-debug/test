@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from captcha_flow import process_answered
 from config import settings
+from quiet_hours import QUIET_MESSAGE, is_quiet_hours
 from emaktab import login, fetch_data, CaptchaRequired, LoginFailed
 from firebase_client import (
     BatchWriter,
@@ -327,7 +328,16 @@ def do_register(task_id, req):
 # ============================================================
 # AUTO-SYNC — har soatda
 # ============================================================
-def sync_all_students():
+def sync_all_students(force: bool = False):
+    # Tungi tanaffus (Toshkent 00:00-07:00): avtomatik kirish yo'q.
+    # force=True — admin /api/sync-now orqali qo'lda ishga tushirgan holat.
+    if not force and is_quiet_hours():
+        log.info(
+            "AUTO-SYNC o'tkazib yuborildi — tungi tanaffus (%02d:00-%02d:00)",
+            settings.quiet_start_hour, settings.quiet_end_hour,
+        )
+        return
+
     log.info("=" * 60)
     log.info("AUTO-SYNC boshlandi")
     log.info("=" * 60)
@@ -414,6 +424,8 @@ def _process_captcha_answers():
     tushirish YETARLI: alohida 'main.py' xizmatini Railway'da qo'shimcha
     joylashtirish shart emas.
     """
+    if is_quiet_hours():
+        return  # tungi tanaffus — javoblar ertalab 07:00 dan keyin qayta ishlanadi
     from main import sync_one
     process_answered(sync_one)
 
@@ -467,6 +479,12 @@ def register_start(req: RegisterRequest):
     if not req.phone or not req.motherPhone:
         raise HTTPException(400, "Telefon raqamlar majburiy")
 
+    # Ro'yxatdan o'tish ham eMaktab'ga avtomatik kirishni talab qiladi,
+    # shuning uchun tungi tanaffusda to'xtatiladi (QUIET_BLOCK_REGISTER=false
+    # qilinsa, tunda ham ruxsat beriladi).
+    if settings.quiet_block_register and is_quiet_hours():
+        raise HTTPException(503, QUIET_MESSAGE)
+
     _purge_tasks()
     task_id = uuid.uuid4().hex
     _task_ts[task_id] = time.time()
@@ -494,7 +512,7 @@ def register_status(task_id: str):
 # SYNC NOW — faqat POST va admin token bilan (X-Admin-Token)
 @app.post("/api/sync-now", dependencies=[Depends(require_admin)])
 def sync_now():
-    thread = threading.Thread(target=sync_all_students)
+    thread = threading.Thread(target=sync_all_students, kwargs={"force": True})
     thread.daemon = True
     thread.start()
     return {"status": "started", "message": "Sync boshlandi. Log'ni kuzatib turing."}

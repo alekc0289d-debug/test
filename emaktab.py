@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -46,6 +47,48 @@ class LoginResult:
     method: str
 
 
+def _kill_tree(pid: int):
+    """pid va uning barcha avlodlarini (Linux /proc orqali) majburan to'xtatadi.
+    Chrome ko'p bolalik jarayon ochadi — faqat chromedriver'ni o'ldirish
+    yetmaydi, bolalari xotirada qolib ketadi."""
+    import signal
+
+    children: dict = {}
+    try:
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{name}/stat") as f:
+                    stat = f.read()
+                # "pid (comm) S ppid ..." — comm ichida bo'sh joy/qavs bo'lishi mumkin
+                ppid = int(stat.rsplit(")", 1)[1].split()[1])
+                children.setdefault(ppid, []).append(int(name))
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    order, stack = [], [pid]
+    while stack:
+        p = stack.pop()
+        order.append(p)
+        stack.extend(children.get(p, []))
+    for p in reversed(order):  # avval avlodlar, oxirida o'zi
+        try:
+            os.kill(p, signal.SIGKILL)
+        except Exception:
+            pass
+
+
+_CHROME_SLOTS = threading.BoundedSemaphore(int(os.getenv("MAX_CHROME", "2")))
+# Bitta Chrome seansining ENG KO'P umri. Undan oshsa, majburan o'chiriladi
+# (osilib qolgan ish butun serverni soatlab band qilib turmasligi uchun).
+_CHROME_MAX_SECONDS = int(os.getenv("CHROME_MAX_SECONDS", "420"))
+_CHROME_WAIT = int(os.getenv("CHROME_WAIT_SECONDS", "240"))
+_PAGE_LOAD_TIMEOUT = int(os.getenv("PAGE_LOAD_TIMEOUT", "90"))
+
+
 def create_driver():
     o = Options()
     if settings.headless:
@@ -66,7 +109,80 @@ def create_driver():
     chrome_bin = os.getenv("CHROME_BIN")
     if chrome_bin:
         o.binary_location = chrome_bin
-    return webdriver.Chrome(options=o)
+
+    # Bir vaqtda ochiq Chrome soni cheklanadi. Har biri 300-500 MB xotira
+    # oladi; soatlik sync, captcha ishi va ro'yxatdan o'tish bir vaqtda
+    # Chrome ochsa, konteyner xotirasi tugab, server "qotib" qolardi.
+    if not _CHROME_SLOTS.acquire(timeout=_CHROME_WAIT):
+        raise RuntimeError(
+            "Chrome band (navbat uzoq davom etdi) — keyinroq urinib ko'ring"
+        )
+
+    drv = None
+    try:
+        last = None
+        for attempt in (1, 2):
+            try:
+                drv = webdriver.Chrome(options=o)
+                break
+            except Exception as e:  # vaqtinchalik ishga tushmay qolish
+                last = e
+                log.warning("Chrome ishga tushmadi (urinish %s/2): %s", attempt, e)
+                time.sleep(2)
+        if drv is None:
+            raise last
+        # Avval vaqt chegarasi yo'q edi (standart ~5 daqiqa) — bitta sust
+        # sahifa butun ishni uzoq muddat band qilib qo'yardi.
+        drv.set_page_load_timeout(_PAGE_LOAD_TIMEOUT)
+        drv.set_script_timeout(30)
+    except BaseException:
+        if drv is not None:
+            try:
+                drv.quit()
+            except Exception:
+                pass
+        _CHROME_SLOTS.release()
+        raise
+
+    _orig_quit = drv.quit
+    _released = threading.Event()
+    _rel_lock = threading.Lock()
+
+    def _release_once():
+        with _rel_lock:
+            if _released.is_set():
+                return
+            _released.set()
+        _CHROME_SLOTS.release()
+
+    def _watchdog_fire():
+        log.error(
+            "Chrome seansi %s soniyadan oshdi (osilib qolgan) — "
+            "majburan to'xtatilmoqda", _CHROME_MAX_SECONDS,
+        )
+        try:
+            _kill_tree(drv.service.process.pid)
+        except Exception as e:
+            log.warning("watchdog: jarayonni to'xtatib bo'lmadi: %s", e)
+        # Osilib qolgan oqim hech qachon quit() chaqirmasa ham joy
+        # bo'shaydi — aks holda keyingi barcha ishlar abadiy kutib qoladi.
+        _release_once()
+
+    _timer = threading.Timer(_CHROME_MAX_SECONDS, _watchdog_fire)
+    _timer.daemon = True
+    _timer.start()
+
+    def _quit_and_release():
+        _timer.cancel()
+        try:
+            _orig_quit()
+        except Exception as e:  # jarayon allaqachon o'lgan bo'lishi mumkin
+            log.debug("quit() xatosi (e'tiborsiz): %s", e)
+        finally:
+            _release_once()
+
+    drv.quit = _quit_and_release
+    return drv
 
 
 def _hc(d):
@@ -79,6 +195,29 @@ def _hc(d):
         )
     except Exception:
         return False
+
+
+def _grab_captcha(d):
+    """Sahifadagi JORIY captcha rasmi (base64) yoki None."""
+    try:
+        img = d.find_element(
+            By.CSS_SELECTOR, 'img[id*="captcha"], img[src*="captcha"]'
+        )
+        return _b64.b64encode(img.screenshot_as_png).decode()
+    except Exception:
+        return None
+
+
+def _grab_hidden(d):
+    hf = {}
+    try:
+        for el in d.find_elements(By.CSS_SELECTOR, 'form input[type="hidden"]'):
+            n = el.get_attribute("name")
+            if n:
+                hf[n] = el.get_attribute("value") or ""
+    except Exception:
+        pass
+    return hf
 
 
 def _slow(el, v):
@@ -124,6 +263,7 @@ def login(login, password, driver=None):
                 pass
 
             sol = None
+            submitted = False
             if cb64:
                 try:
                     sol = solve_captcha(_b64.b64decode(cb64))
@@ -144,10 +284,23 @@ def login(login, password, driver=None):
                         By.CSS_SELECTOR,
                         'button[type="submit"], input[type="submit"]'
                     ).click()
+                    submitted = True
                     WebDriverWait(d, 30).until(
                         lambda x: "login.emaktab.uz" not in x.current_url
                     )
                     return LoginResult(d.get_cookies(), "login")
+                except Exception:
+                    pass
+
+            # Avtomatik yechish muvaffaqiyatsiz bo'lsa, sahifa YANGI captcha
+            # bilan qayta yuklangan. Avval adminga ESKI rasm ko'rsatilardi,
+            # cookie/token esa YANGI sahifaniki edi — admin to'g'ri javob
+            # yozsa ham "captcha xato" chiqardi. Endi joriy rasm olinadi.
+            if submitted:
+                try:
+                    if _hc(d):
+                        cb64 = _grab_captcha(d) or cb64
+                        hf = _grab_hidden(d) or hf
                 except Exception:
                     pass
 

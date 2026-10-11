@@ -11,6 +11,7 @@ from crypto import decrypt
 from emaktab import CaptchaRequired, LoginFailed, fetch_data, login
 from captcha_flow import process_answered
 from config import settings
+from quiet_hours import is_quiet_hours
 from firebase_client import (
     mark_error,
     next_queue,
@@ -143,9 +144,20 @@ def main():
         sync_queue(BATCH, a.class_id)
         return
 
+    def _scheduled_sync():
+        if is_quiet_hours():
+            log.info("Tungi tanaffus — sync o'tkazib yuborildi")
+            return
+        sync_queue()
+
+    def _scheduled_captcha():
+        if is_quiet_hours():
+            return
+        process_answered(sync_one)
+
     s = BlockingScheduler(timezone=timezone(timedelta(hours=5)))
     s.add_job(
-        sync_queue,
+        _scheduled_sync,
         "cron",
         hour="*",
         minute=0,
@@ -154,7 +166,7 @@ def main():
         coalesce=True,
     )
     s.add_job(
-        lambda: process_answered(sync_one),
+        _scheduled_captcha,
         "interval",
         minutes=3,
         id="captcha_answers",
